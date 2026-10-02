@@ -12,7 +12,6 @@ from werkzeug.security import generate_password_hash, check_password_hash
 DATABASE = "users.db"
 API_URL = "http://192.168.240.23:5000"
 
-
 # Manages the SQLite database used for account creation and authentication.
 class DatabaseManager:
     def __init__(self, database):
@@ -213,7 +212,7 @@ class RoverAPI:
     def run(self):
         # Run the API locally so the GUI can communicate with it.
         self.app.run(
-            host="192.168.240.23",
+            host="0.0.0.0",
             port=5000,
             debug=False,
             use_reloader=False
