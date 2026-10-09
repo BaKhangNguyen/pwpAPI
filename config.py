@@ -1,0 +1,4 @@
+API_URL = "http://192.168.240.222:5000"
+REQUEST_TIMEOUT = 5
+WINDOW_TITLE = "DSE Mars Rover Control System"
+WINDOW_SIZE = "1200x800"
