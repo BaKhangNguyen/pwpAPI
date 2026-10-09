@@ -45,7 +45,7 @@ def run_command(command):
     )
 
 
-@app.get("/health")
+@app.route("/health", methods=["GET"])
 def health():
     return jsonify(
         success=True,
@@ -53,7 +53,7 @@ def health():
     )
 
 
-@app.post("/create-account")
+@app.route("/create-account", methods=["POST"])
 def create_account():
     data = request.get_json(silent=True) or {}
 
@@ -84,7 +84,7 @@ def create_account():
     ), 201 if success else 409
 
 
-@app.post("/login")
+@app.route("/login", methods=["POST"])
 def login():
     data = request.get_json(silent=True) or {}
 
@@ -123,32 +123,32 @@ def login():
     )
 
 
-@app.post("/fwd")
+@app.route("/fwd", methods=["POST"])
 def fwd():
     return run_command("FWD")
 
 
-@app.post("/backwd")
+@app.route("/backwd", methods=["POST"])
 def backwd():
     return run_command("BACKWD")
 
 
-@app.post("/left")
+@app.route("/left", methods=["POST"])
 def left():
     return run_command("LEFT")
 
 
-@app.post("/right")
+@app.route("/right", methods=["POST"])
 def right():
     return run_command("RIGHT")
 
 
-@app.post("/stop")
+@app.route("/stop", methods=["POST"])
 def stop():
     return run_command("STOP")
 
 
-@app.get("/status")
+@app.route("/status", methods=["GET"])
 def status():
     if not is_authenticated():
         return jsonify(
