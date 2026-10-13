@@ -15,7 +15,7 @@ class RobotClass:
         self.RIGHT_FORWARD = FORWARD
 
         self.LEFT_DRIVE_SPEED = 80
-        self.RIGHT_DRIVE_SPEED = 70
+        self.RIGHT_DRIVE_SPEED = 60
         self.TURN_SPEED = 65
 
         self.current_command = "STOP"
