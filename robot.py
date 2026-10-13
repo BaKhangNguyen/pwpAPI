@@ -14,7 +14,8 @@ class RobotClass:
         self.LEFT_FORWARD = FORWARD
         self.RIGHT_FORWARD = FORWARD
 
-        self.DRIVE_SPEED = 70
+        self.LEFT_DRIVE_SPEED = 80
+        self.RIGHT_DRIVE_SPEED = 70
         self.TURN_SPEED = 65
 
         self.current_command = "STOP"
@@ -25,6 +26,7 @@ class RobotClass:
     def opposite(self, direction):
         if direction == FORWARD:
             return BACKWARD
+
         return FORWARD
 
     def run_motors(
@@ -56,9 +58,10 @@ class RobotClass:
             self.run_motors(
                 self.LEFT_FORWARD,
                 self.RIGHT_FORWARD,
-                self.DRIVE_SPEED,
-                self.DRIVE_SPEED
+                self.LEFT_DRIVE_SPEED,
+                self.RIGHT_DRIVE_SPEED
             )
+
             self.current_command = "FWD"
 
         return "Rover moving forward."
@@ -68,9 +71,10 @@ class RobotClass:
             self.run_motors(
                 self.opposite(self.LEFT_FORWARD),
                 self.opposite(self.RIGHT_FORWARD),
-                self.DRIVE_SPEED,
-                self.DRIVE_SPEED
+                self.LEFT_DRIVE_SPEED,
+                self.RIGHT_DRIVE_SPEED
             )
+
             self.current_command = "BACKWD"
 
         return "Rover moving backward."
@@ -83,6 +87,7 @@ class RobotClass:
                 self.TURN_SPEED,
                 self.TURN_SPEED
             )
+
             self.current_command = "LEFT"
 
         return "Rover turning left."
@@ -95,6 +100,7 @@ class RobotClass:
                 self.TURN_SPEED,
                 self.TURN_SPEED
             )
+
             self.current_command = "RIGHT"
 
         return "Rover turning right."
@@ -103,6 +109,7 @@ class RobotClass:
         with self.lock:
             self.motor.stop(self.LEFT_MOTOR)
             self.motor.stop(self.RIGHT_MOTOR)
+
             self.current_command = "STOP"
 
         return "Rover stopped."
@@ -120,6 +127,7 @@ class RobotClass:
             return False, "Invalid rover command."
 
         message = commands[command]()
+
         print(command, message)
 
         return True, message
