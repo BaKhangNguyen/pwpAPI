@@ -4,24 +4,36 @@ import time
 import tkinter as tk
 
 
+# Main GUI screen for controlling the rover.
 class ControlScreen(tk.Frame):
     def __init__(self, parent, client, username):
         super().__init__(parent)
+
+        # Store user and API information.
         self.client = client
         self.username = username
+
+        # Set default rover control state.
         self.control_mode = "HOLD"
         self.active_command = "STOP"
         self.closing = False
+
+        # Locks prevent multiple threads from changing commands
+        # or sending API requests at the same time.
         self.command_lock = threading.Lock()
         self.network_lock = threading.Lock()
+
+        # Queues store rover commands and GUI log messages.
         self.command_queue = queue.Queue()
         self.log_queue = queue.Queue()
         self.release_job = None
 
+        # Build and start the control interface.
         self.pack(fill="both", expand=True)
         self.create_layout()
         self.bind_controls()
 
+        # Start the background command worker and log processor.
         threading.Thread(target=self.command_worker, daemon=True).start()
         self.after(50, self.process_log_queue)
 
@@ -30,12 +42,14 @@ class ControlScreen(tk.Frame):
         self.add_log("SYSTEM: Control mode = HOLD.")
         self.focus_set()
 
+    # Create one of the four equal GUI panels.
     def create_panel(self, relx, rely, title):
         panel = tk.Frame(self, bd=2, relief="solid")
         panel.place(relx=relx, rely=rely, relwidth=0.5, relheight=0.5)
         tk.Label(panel, text=title, font=("Arial", 20)).pack(pady=10)
         return panel
 
+    # Create a black placeholder area for a future video stream.
     def create_video_panel(self, relx, rely, title):
         panel = self.create_panel(relx, rely, title)
         screen = tk.Frame(panel, bg="black")
@@ -49,12 +63,14 @@ class ControlScreen(tk.Frame):
         ).place(relx=0.5, rely=0.5, anchor="center")
         return panel
 
+    # Build the four-quadrant GUI layout and rover controls.
     def create_layout(self):
         self.create_video_panel(0.0, 0.0, "VIDEO STREAMING 1")
         controls = self.create_panel(0.5, 0.0, "ROVER CONTROL")
         self.create_video_panel(0.0, 0.5, "VIDEO STREAMING 2")
         log_panel = self.create_panel(0.5, 0.5, "USER LOG")
 
+        # Button for switching between HOLD and CONTINUOUS modes.
         self.mode_button = tk.Button(
             controls,
             text="MODE: HOLD",
@@ -66,6 +82,7 @@ class ControlScreen(tk.Frame):
         control_area = tk.Frame(controls)
         control_area.place(relx=0.5, rely=0.56, anchor="center")
 
+        # Directional movement controls.
         self.forward_button = self.make_drive_button(control_area, "↑", "FWD")
         self.forward_button.grid(row=0, column=1, padx=8, pady=8)
 
@@ -87,6 +104,7 @@ class ControlScreen(tk.Frame):
         self.backward_button = self.make_drive_button(control_area, "↓", "BACKWD")
         self.backward_button.grid(row=2, column=1, padx=8, pady=8)
 
+        # Status button requests the current command from the Raspberry Pi.
         self.status_button = tk.Button(
             control_area,
             text="STATUS",
@@ -95,6 +113,7 @@ class ControlScreen(tk.Frame):
         )
         self.status_button.grid(row=3, column=1, padx=8, pady=8)
 
+        # Explain how the current control mode works.
         self.mode_help_label = tk.Label(
             controls,
             text="Hold mode: release = STOP",
@@ -102,6 +121,7 @@ class ControlScreen(tk.Frame):
         )
         self.mode_help_label.place(relx=0.5, rely=0.93, anchor="center")
 
+        # User Log displays commands, errors, and rover status.
         self.log_screen = tk.Text(
             log_panel,
             bg="black",
@@ -110,6 +130,7 @@ class ControlScreen(tk.Frame):
         )
         self.log_screen.place(relx=0.05, rely=0.15, relwidth=0.90, relheight=0.75)
 
+    # Create a movement button with mouse press and release controls.
     def make_drive_button(self, parent, text, command):
         button = tk.Button(
             parent,
@@ -125,10 +146,12 @@ class ControlScreen(tk.Frame):
         button.bind("<ButtonRelease-1>", lambda event: self.mouse_release())
         return button
 
+    # Switch between HOLD and CONTINUOUS movement modes.
     def toggle_control_mode(self):
         if self.closing:
             return
 
+        # Stop the rover before changing control modes.
         self.force_stop()
 
         if self.control_mode == "HOLD":
@@ -143,6 +166,7 @@ class ControlScreen(tk.Frame):
         self.add_log(f"SYSTEM: Control mode = {self.control_mode}.")
         self.focus_set()
 
+    # Mouse input starts movement and stops on release in HOLD mode.
     def mouse_press(self, command):
         if not self.closing:
             self.start_command(command)
@@ -151,6 +175,7 @@ class ControlScreen(tk.Frame):
         if not self.closing and self.control_mode == "HOLD":
             self.force_stop()
 
+    # Bind arrow keys and WASD to rover movement.
     def bind_controls(self):
         key_commands = {
             "Up": "FWD",
@@ -177,9 +202,11 @@ class ControlScreen(tk.Frame):
                 lambda event: self.key_release(),
             )
 
+        # Space is an emergency STOP and closing the window uses safe shutdown.
         self.winfo_toplevel().bind("<space>", lambda event: self.force_stop())
         self.winfo_toplevel().protocol("WM_DELETE_WINDOW", self.close_window)
 
+    # Handle keyboard movement commands.
     def key_press(self, command):
         if self.closing:
             return
@@ -189,6 +216,7 @@ class ControlScreen(tk.Frame):
 
         self.start_command(command)
 
+    # In HOLD mode, delay STOP slightly to handle keyboard auto-repeat.
     def key_release(self):
         if self.closing or self.control_mode != "HOLD":
             return
@@ -209,6 +237,7 @@ class ControlScreen(tk.Frame):
                 pass
             self.release_job = None
 
+    # Add a new rover command to the command queue.
     def start_command(self, command):
         if self.closing:
             return
@@ -220,6 +249,7 @@ class ControlScreen(tk.Frame):
 
         self.command_queue.put(command)
 
+    # Remove commands that are still waiting to be processed.
     def clear_pending_commands(self):
         while True:
             try:
@@ -228,6 +258,7 @@ class ControlScreen(tk.Frame):
             except queue.Empty:
                 break
 
+    # Stop the rover and give STOP priority over waiting commands.
     def force_stop(self):
         if self.closing:
             return
@@ -240,6 +271,7 @@ class ControlScreen(tk.Frame):
         self.clear_pending_commands()
         self.command_queue.put("STOP")
 
+    # Background worker sends queued commands to the Raspberry Pi API.
     def command_worker(self):
         while True:
             command = self.command_queue.get()
@@ -259,6 +291,7 @@ class ControlScreen(tk.Frame):
             finally:
                 self.command_queue.task_done()
 
+    # If a movement command fails, attempt to stop the rover for safety.
     def handle_command_failure(self, command, message):
         self.add_log(f"ERROR: {command} | {message}")
 
@@ -281,6 +314,7 @@ class ControlScreen(tk.Frame):
             else:
                 self.add_log("SAFETY ERROR: STOP could not be confirmed.")
 
+    # Retry STOP if the first safety request does not succeed.
     def send_stop_with_retry(self, attempts=2):
         for attempt in range(attempts):
             try:
@@ -300,6 +334,7 @@ class ControlScreen(tk.Frame):
 
         return False
 
+    # Request rover status in a separate thread so the GUI stays responsive.
     def get_status(self):
         if self.closing:
             return
@@ -322,9 +357,11 @@ class ControlScreen(tk.Frame):
         except Exception as error:
             self.add_log(f"ERROR: STATUS | {error}")
 
+    # Place messages into the log queue for safe Tkinter processing.
     def add_log(self, message):
         self.log_queue.put(message)
 
+    # Display queued log messages in the User Log.
     def process_log_queue(self):
         if self.closing:
             return
@@ -343,6 +380,7 @@ class ControlScreen(tk.Frame):
 
         self.after(50, self.process_log_queue)
 
+    # Safely stop the rover before closing the application.
     def close_window(self):
         if self.closing:
             return
