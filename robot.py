@@ -20,7 +20,7 @@ class RobotClass:
 
         # Use different drive speeds to help the rover move straight.
         self.LEFT_DRIVE_SPEED = 98
-        self.RIGHT_DRIVE_SPEED = 62
+        self.RIGHT_DRIVE_SPEED = 60
         self.TURN_SPEED = 65
 
         # Track the current movement command.
