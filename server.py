@@ -7,14 +7,19 @@ from database import DatabaseManager
 from robot import RobotClass
 
 
+# Name of the SQLite database used for user accounts.
 DATABASE = "users.db"
 
+# Create the database manager, physical rover controller, and Flask app.
 database = DatabaseManager(DATABASE)
 rover = RobotClass()
 app = Flask(__name__)
+
+# Store active login tokens and the usernames connected to them.
 tokens = {}
 
 
+# Check whether an incoming request contains a valid Bearer token.
 def is_authenticated():
     authorization = request.headers.get(
         "Authorization",
@@ -27,6 +32,7 @@ def is_authenticated():
     )
 
 
+# Run one rover command after verifying authentication.
 def run_command(command):
     if not is_authenticated():
         return jsonify(
@@ -45,6 +51,7 @@ def run_command(command):
     )
 
 
+# Health endpoint used by the laptop to check whether the API is online.
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify(
@@ -53,6 +60,7 @@ def health():
     )
 
 
+# Create a new user account and store the hashed password in SQLite.
 @app.route("/create-account", methods=["POST"])
 def create_account():
     data = request.get_json(silent=True) or {}
@@ -67,6 +75,7 @@ def create_account():
         ""
     )
 
+    # Reject requests with missing login information.
     if not username or not password:
         return jsonify(
             success=False,
@@ -78,12 +87,14 @@ def create_account():
         password
     )
 
+    # Return 201 for successful creation or 409 if the username already exists.
     return jsonify(
         success=success,
         message=message
     ), 201 if success else 409
 
 
+# Authenticate an existing user and create a session token.
 @app.route("/login", methods=["POST"])
 def login():
     data = request.get_json(silent=True) or {}
@@ -98,12 +109,14 @@ def login():
         ""
     )
 
+    # Reject empty username or password fields.
     if not username or not password:
         return jsonify(
             success=False,
             message="Username and password are required."
         ), 400
 
+    # Verify the entered password using DatabaseManager.
     if not database.authenticate_user(
         username,
         password
@@ -113,6 +126,7 @@ def login():
             message="Invalid username or password."
         ), 401
 
+    # Generate a random authentication token for the successful login.
     token = secrets.token_hex(32)
     tokens[token] = username
 
@@ -123,6 +137,7 @@ def login():
     )
 
 
+# Movement endpoints send the matching command to RobotClass.
 @app.route("/fwd", methods=["POST"])
 def fwd():
     return run_command("FWD")
@@ -148,6 +163,7 @@ def stop():
     return run_command("STOP")
 
 
+# Return the current rover movement status to an authenticated user.
 @app.route("/status", methods=["GET"])
 def status():
     if not is_authenticated():
@@ -162,11 +178,15 @@ def status():
     )
 
 
+# Stop the rover if the Python program exits normally.
 atexit.register(rover.STOP)
 
 
+# Start the Flask server when server.py is run directly.
 if __name__ == "__main__":
     try:
+        # Listen on all local network interfaces using TCP port 5000.
+        # Threaded mode allows multiple API requests to be handled.
         app.run(
             host="0.0.0.0",
             port=5000,
@@ -174,5 +194,7 @@ if __name__ == "__main__":
             use_reloader=False,
             threaded=True
         )
+
+    # Make sure the motors are stopped when the server shuts down.
     finally:
         rover.STOP()
