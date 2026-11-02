@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DSE Mars Rover Control System</title>
+<style>
+  /* Keep the same plain appearance as the original Tkinter GUI. */
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #f0f0f0; font-family: Arial, sans-serif; }
+  button { font-family: Arial, sans-serif; cursor: pointer; touch-action: none; user-select: none; }
+  [hidden] { display: none !important; }
+
+  #login-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; text-align: center; }
+  #login-screen h1 { font-size: 30px; font-weight: normal; margin: 0 0 20px; }
+  #login-screen label { display: block; font-size: 14px; margin-top: 12px; }
+  #login-screen input { width: 250px; padding: 5px; font: 14px Arial, sans-serif; margin-top: 5px; }
+  #login-screen button { display: block; width: 130px; padding: 6px; margin: 10px auto 0; }
+  #connection { margin-top: 20px; }
+
+  #control-screen { width: 100%; height: 100vh; height: 100dvh; min-height: 520px;
+                    display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+  .panel { border: 2px solid gray; position: relative; min-width: 0; min-height: 0; }
+  .panel-title { font-size: 20px; font-weight: normal; text-align: center; margin: 10px 0; }
+  .video, #log { position: absolute; left: 5%; top: 15%; width: 90%; height: 75%; background: black; color: white; }
+  .video { display: flex; justify-content: center; align-items: center; font-size: 20px; text-align: center; }
+  #log { font: 12px Consolas, monospace; padding: 6px; overflow-y: auto; white-space: pre-wrap; }
+
+  #mode { position: absolute; top: 15%; left: 50%; transform: translate(-50%, -50%); width: 150px; padding: 4px; }
+  #buttons { position: absolute; top: 56%; left: 50%; transform: translate(-50%, -50%);
+             display: grid; grid-template-columns: repeat(3, 88px); gap: 8px; justify-items: center; align-items: center; }
+  .drive { font-size: 20px; width: 78px; height: 65px; }
+  #stop { width: 78px; height: 65px; }
+  #status { grid-column: 2; width: 90px; padding: 5px; }
+  #help { position: absolute; top: 93%; left: 50%; transform: translate(-50%, -50%);
+          font-size: 11px; white-space: nowrap; text-align: center; }
+</style>
+</head>
+<body>
+
+<!-- Same login screen as login_screen.py -->
+<div id="login-screen">
+  <div>
+    <h1>DSE MARS ROVER</h1>
+    <label for="username">Username</label>
+    <input id="username" autocomplete="username">
+    <label for="password">Password</label>
+    <input id="password" type="password" autocomplete="current-password">
+    <button id="login-button">Login</button>
+    <button id="create-button">Create Account</button>
+    <div id="connection">Checking Raspberry Pi connection...</div>
+  </div>
+</div>
+
+<!-- Same four equally sized panels as control_screen.py -->
+<div id="control-screen" hidden>
+  <div class="panel">
+    <h2 class="panel-title">VIDEO STREAMING 1</h2>
+    <div class="video">VIDEO STREAMING 1</div>
+  </div>
+  <div class="panel">
+    <h2 class="panel-title">ROVER CONTROL</h2>
+    <button id="mode">MODE: HOLD</button>
+    <div id="buttons">
+      <span></span><button class="drive" data-command="FWD">↑</button><span></span>
+      <button class="drive" data-command="LEFT">←</button>
+      <button id="stop">STOP</button>
+      <button class="drive" data-command="RIGHT">→</button>
+      <span></span><button class="drive" data-command="BACKWD">↓</button><span></span>
+      <span></span><button id="status">STATUS</button><span></span>
+    </div>
+    <div id="help">Hold mode: release = STOP</div>
+  </div>
+  <div class="panel">
+    <h2 class="panel-title">VIDEO STREAMING 2</h2>
+    <div class="video">VIDEO STREAMING 2</div>
+  </div>
+  <div class="panel">
+    <h2 class="panel-title">USER LOG</h2>
+    <div id="log" role="log" aria-live="polite"></div>
+  </div>
+</div>
+
+<script>
+  // Only the Tkinter screen is replaced. Flask and RobotClass are unchanged.
+  const el = id => document.getElementById(id);
+  const routes = { FWD: 'fwd', BACKWD: 'backwd', LEFT: 'left', RIGHT: 'right', STOP: 'stop' };
+  let token = '';
+  let mode = 'HOLD';
+  let active = 'STOP';
+  let queue = [];
+  let working = false;
+  let pointer = null;
+  let releaseTimer = null;
+
+  async function api(path, method = 'GET', body) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch('/api/' + path, {
+        method,
+        headers: {
+          ...(body ? { 'Content-Type': 'application/json' } : {}),
+          ...(token ? { Authorization: 'Bearer ' + token } : {})
+        },
+        body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+        cache: 'no-store'
+      });
+      const data = await response.json();
+      return { ok: response.ok && data.success !== false, data };
+    } catch (error) {
+      return { ok: false, data: { message: 'Raspberry Pi API not reachable.' } };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function log(message) {
+    el('log').textContent += message + '\n';
+    el('log').scrollTop = el('log').scrollHeight;
+  }
+
+  async function checkConnection() {
+    const result = await api('health');
+    el('connection').textContent = result.ok
+      ? 'Raspberry Pi connected: ' + result.data.message
+      : 'Raspberry Pi API not reachable.';
+  }
+
+  async function authenticate(action) {
+    const username = el('username').value.trim();
+    const password = el('password').value;
+    if (!username || !password) return alert('Enter a username and password.');
+    el('login-button').disabled = true;
+    el('create-button').disabled = true;
+    const result = await api(action, 'POST', { username, password });
+    el('login-button').disabled = false;
+    el('create-button').disabled = false;
+    if (!result.ok) return alert(result.data.message || 'Request failed.');
+    if (action === 'create-account') return alert(result.data.message || 'Account created successfully.');
+    if (!result.data.token) return alert('Login returned no authentication token.');
+
+    token = result.data.token;
+    el('password').value = '';
+    el('login-screen').hidden = true;
+    el('control-screen').hidden = false;
+    log('SYSTEM: Rover control system initialized.');
+    log('SYSTEM: Logged in as ' + username + '.');
+    log('SYSTEM: Control mode = HOLD.');
+  }
+
+  el('login-button').onclick = () => authenticate('login');
+  el('create-button').onclick = () => authenticate('create-account');
+  el('password').onkeydown = event => { if (event.key === 'Enter') authenticate('login'); };
+  checkConnection();
+
+  // Send commands in order, like the Tkinter command worker.
+  async function processQueue() {
+    if (working) return;
+    working = true;
+    try {
+      while (queue.length) {
+        const command = queue.shift();
+        const result = await api(routes[command], 'POST');
+        if (result.ok) {
+          log('COMMAND: ' + command + ' | ' + (result.data.message || 'OK'));
+        } else {
+          log('ERROR: ' + command + ' | ' + (result.data.message || 'Request failed.'));
+          queue = [];
+          active = 'STOP';
+          let confirmed = false;
+          for (let attempt = 0; attempt < (command === 'STOP' ? 1 : 2); attempt++) {
+            if ((await api('stop', 'POST')).ok) { confirmed = true; break; }
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          log(confirmed ? 'SAFETY: STOP confirmed after command failure.'
+                        : 'SAFETY ERROR: STOP could not be confirmed.');
+        }
+      }
+    } finally {
+      working = false;
+    }
+  }
+
+  function start(command) {
+    if (!token || command === active) return;
+    active = command;
+    queue.push(command);
+    processQueue();
+  }
+
+  function stop() {
+    if (!token) return;
+    active = 'STOP';
+    queue = ['STOP'];    // STOP has priority over waiting movement commands.
+    processQueue();
+  }
+
+  const buttons = document.querySelectorAll('.drive');
+  buttons.forEach(button => {
+    button.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || !token) return;
+      event.preventDefault();
+      pointer = event.pointerId;
+      button.setPointerCapture(pointer);
+      start(button.dataset.command);
+    });
+    function release(event) {
+      if (event.pointerId !== pointer) return;
+      pointer = null;
+      if (mode === 'HOLD') stop();
+    }
+    button.addEventListener('pointerup', release);
+    button.addEventListener('pointercancel', release);
+    button.addEventListener('lostpointercapture', release);
+  });
+
+  el('stop').onclick = stop;
+  el('mode').onclick = () => {
+    stop();
+    mode = mode === 'HOLD' ? 'CONTINUOUS' : 'HOLD';
+    el('mode').textContent = 'MODE: ' + mode;
+    el('help').textContent = mode === 'HOLD'
+      ? 'Hold mode: release = STOP'
+      : 'Continuous mode: press STOP to stop';
+    log('SYSTEM: Control mode = ' + mode + '.');
+  };
+  el('status').onclick = async () => {
+    const result = await api('status');
+    if (result.ok) {
+      const s = result.data.status || {};
+      log('STATUS: Command=' + s.command + ' | Simulation=' + (s.simulation ? 'True' : 'False'));
+    } else {
+      log('ERROR: STATUS | ' + (result.data.message || 'Request failed.'));
+    }
+  };
+
+  // Same WASD / arrow / Space commands as the uploaded Tkinter version.
+  const keys = { ArrowUp: 'FWD', w: 'FWD', ArrowDown: 'BACKWD', s: 'BACKWD',
+                 ArrowLeft: 'LEFT', a: 'LEFT', ArrowRight: 'RIGHT', d: 'RIGHT' };
+  window.addEventListener('keydown', event => {
+    if (el('control-screen').hidden || event.target.matches('input, textarea')) return;
+    if (event.code === 'Space') { event.preventDefault(); stop(); return; }
+    const command = keys[event.key.length === 1 ? event.key.toLowerCase() : event.key];
+    if (!command) return;
+    event.preventDefault();
+    clearTimeout(releaseTimer);
+    start(command);
+  });
+  window.addEventListener('keyup', event => {
+    if (el('control-screen').hidden || mode !== 'HOLD') return;
+    const command = keys[event.key.length === 1 ? event.key.toLowerCase() : event.key];
+    if (!command) return;
+    event.preventDefault();
+    clearTimeout(releaseTimer);
+    releaseTimer = setTimeout(stop, 80);
+  });
+
+  // Try STOP on page exit, but browsers and lost Wi-Fi cannot guarantee delivery.
+  window.addEventListener('pagehide', () => {
+    if (!token) return;
+    fetch('/api/stop', {
+      method: 'POST', headers: { Authorization: 'Bearer ' + token }, keepalive: true
+    }).catch(() => {});
+  });
+</script>
+</body>
+</html>
