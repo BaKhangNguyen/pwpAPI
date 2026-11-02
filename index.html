@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DSE Mars Rover Control System</title>
 <style>
-  /* Keep the same plain appearance as the original Tkinter GUI. */
+
   * { box-sizing: border-box; }
   body { margin: 0; background: #f0f0f0; font-family: Arial, sans-serif; }
   button { font-family: Arial, sans-serif; cursor: pointer; touch-action: none; user-select: none; }
@@ -38,7 +38,7 @@
 </head>
 <body>
 
-<!-- Same login screen as login_screen.py -->
+
 <div id="login-screen">
   <div>
     <h1>DSE MARS ROVER</h1>
@@ -52,7 +52,7 @@
   </div>
 </div>
 
-<!-- Same four equally sized panels as control_screen.py -->
+
 <div id="control-screen" hidden>
   <div class="panel">
     <h2 class="panel-title">VIDEO STREAMING 1</h2>
@@ -82,7 +82,7 @@
 </div>
 
 <script>
-  // Only the Tkinter screen is replaced. Flask and RobotClass are unchanged.
+
   const el = id => document.getElementById(id);
   const routes = { FWD: 'fwd', BACKWD: 'backwd', LEFT: 'left', RIGHT: 'right', STOP: 'stop' };
   let token = '';
@@ -155,7 +155,7 @@
   el('password').onkeydown = event => { if (event.key === 'Enter') authenticate('login'); };
   checkConnection();
 
-  // Send commands in order, like the Tkinter command worker.
+
   async function processQueue() {
     if (working) return;
     working = true;
@@ -193,7 +193,7 @@
   function stop() {
     if (!token) return;
     active = 'STOP';
-    queue = ['STOP'];    // STOP has priority over waiting movement commands.
+    queue = ['STOP'];   
     processQueue();
   }
 
@@ -236,7 +236,7 @@
     }
   };
 
-  // Same WASD / arrow / Space commands as the uploaded Tkinter version.
+
   const keys = { ArrowUp: 'FWD', w: 'FWD', ArrowDown: 'BACKWD', s: 'BACKWD',
                  ArrowLeft: 'LEFT', a: 'LEFT', ArrowRight: 'RIGHT', d: 'RIGHT' };
   window.addEventListener('keydown', event => {
@@ -257,7 +257,6 @@
     releaseTimer = setTimeout(stop, 80);
   });
 
-  // Try STOP on page exit, but browsers and lost Wi-Fi cannot guarantee delivery.
   window.addEventListener('pagehide', () => {
     if (!token) return;
     fetch('/api/stop', {
