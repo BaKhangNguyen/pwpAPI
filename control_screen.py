@@ -2,6 +2,11 @@ import queue
 import threading
 import time
 import tkinter as tk
+from io import BytesIO
+
+import requests
+from PIL import Image, ImageTk
+from config import API_URL
 
 
 # Main GUI screen for controlling the rover.
@@ -27,6 +32,8 @@ class ControlScreen(tk.Frame):
         self.command_queue = queue.Queue()
         self.log_queue = queue.Queue()
         self.release_job = None
+        self.video_running = True
+        self.video_queue = queue.Queue(maxsize=1)
 
         # Build and start the control interface.
         self.pack(fill="both", expand=True)
@@ -35,7 +42,9 @@ class ControlScreen(tk.Frame):
 
         # Start the background command worker and log processor.
         threading.Thread(target=self.command_worker, daemon=True).start()
+        threading.Thread(target=self.video_worker, daemon=True).start()
         self.after(50, self.process_log_queue)
+        self.after(60, self.update_video)
 
         self.add_log("SYSTEM: Rover control system initialized.")
         self.add_log(f"SYSTEM: Logged in as {self.username}.")
@@ -54,13 +63,16 @@ class ControlScreen(tk.Frame):
         panel = self.create_panel(relx, rely, title)
         screen = tk.Frame(panel, bg="black")
         screen.place(relx=0.05, rely=0.15, relwidth=0.90, relheight=0.75)
-        tk.Label(
+        label = tk.Label(
             screen,
             text=title,
             fg="white",
             bg="black",
             font=("Arial", 20),
-        ).place(relx=0.5, rely=0.5, anchor="center")
+        )
+        label.place(relx=0.5, rely=0.5, anchor="center", relwidth=1, relheight=1)
+        if title == "VIDEO STREAMING 1":
+            self.video_label = label
         return panel
 
     # Build the four-quadrant GUI layout and rover controls.
@@ -334,6 +346,71 @@ class ControlScreen(tk.Frame):
 
         return False
 
+    # Receive camera frames without blocking the Tkinter interface.
+    def video_worker(self):
+        try:
+            with requests.get(
+                API_URL.rstrip("/") + "/video_feed",
+                headers=self.client._headers(),
+                stream=True,
+                timeout=(5, 15),
+            ) as response:
+                response.raise_for_status()
+                self.add_log("VIDEO: Camera connected.")
+                buffer = b""
+                for chunk in response.iter_content(chunk_size=4096):
+                    if self.closing or not self.video_running:
+                        break
+                    if not chunk:
+                        continue
+                    buffer += chunk
+                    while True:
+                        start = buffer.find(b"\xff\xd8")
+                        end = buffer.find(b"\xff\xd9", start + 2) if start != -1 else -1
+                        if start == -1 or end == -1:
+                            if start > 0:
+                                buffer = buffer[start:]
+                            elif len(buffer) > 2_000_000:
+                                buffer = b""
+                            break
+                        jpeg = buffer[start:end + 2]
+                        buffer = buffer[end + 2:]
+                        if self.video_queue.full():
+                            try:
+                                self.video_queue.get_nowait()
+                            except queue.Empty:
+                                pass
+                        self.video_queue.put_nowait(jpeg)
+        except requests.RequestException as error:
+            if not self.closing:
+                self.add_log(f"VIDEO ERROR: {error}")
+
+    # Display the newest camera frame in VIDEO STREAMING 1.
+    def update_video(self):
+        if self.closing:
+            return
+        latest_frame = None
+        try:
+            while True:
+                latest_frame = self.video_queue.get_nowait()
+        except queue.Empty:
+            pass
+
+        if latest_frame is not None:
+            try:
+                with Image.open(BytesIO(latest_frame)) as image:
+                    frame = image.convert("RGB")
+                width = max(1, self.video_label.winfo_width())
+                height = max(1, self.video_label.winfo_height())
+                frame.thumbnail((width, height), Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(frame)
+                self.video_label.config(image=photo, text="")
+                self.video_label.image = photo
+            except (OSError, ValueError):
+                pass
+
+        self.after(60, self.update_video)
+
     # Request rover status in a separate thread so the GUI stays responsive.
     def get_status(self):
         if self.closing:
@@ -386,6 +463,7 @@ class ControlScreen(tk.Frame):
             return
 
         self.closing = True
+        self.video_running = False
         self.cancel_release_job()
         self.clear_pending_commands()
 
