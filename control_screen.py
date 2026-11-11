@@ -348,38 +348,47 @@ class ControlScreen(tk.Frame):
         return False
 
     # Receive the camera stream from the Raspberry Pi.
-        def video_worker(self):
-        url = API_URL.rstrip("/") + "/video_feed"
+            def video_worker(self):
+        """Debug-ready independent background video thread."""
+        import requests
+        
+        # Hardcode your Raspberry Pi's exact IP address and port here to guarantee it hits
+        # (Replace 127.0.0.1 with your actual Pi IP if running the GUI on a separate laptop)
+        url = "http://127.0.0"
+        
+        self.add_log("DEBUG: Video worker thread successfully started.")
         last_error = None
 
         while self.video_running and not self.closing:
             try:
-                # Force format the Authorization token header explicitly 
-                # to guarantee it matches server.py expectations
-                token = getattr(self.client, "token", "")
+                # Bypass the client token manager completely for testing
+                # If your server requires authentication, we dynamically extract it here:
+                token = ""
+                if hasattr(self.client, "token"):
+                    token = self.client.token
+                elif hasattr(self.client, "_token"):
+                    token = self.client._token
+                
                 headers = {"Authorization": f"Bearer {token}"}
+                self.add_log(f"DEBUG: Attempting connection to {url}")
                 
                 with requests.get(
                     url,
                     headers=headers,
                     stream=True,
-                    timeout=(5, 15), # Increased read timeout for Pi stability
+                    timeout=(5, 15),
                 ) as response:
+                    self.add_log(f"DEBUG: Server responded with status code {response.status_code}")
+                    
                     if response.status_code != 200:
-                        try:
-                            detail = response.json().get("message", response.reason)
-                        except ValueError:
-                            detail = response.reason
-                        raise requests.HTTPError(
-                            f"HTTP {response.status_code}: {detail}"
-                        )
+                        self.video_status = f"HTTP {response.status_code}"
+                        time.sleep(2)
+                        continue
 
                     self.video_status = None
-                    self.add_log("VIDEO: USB webcam connected.")
-                    last_error = None
+                    self.add_log("VIDEO: USB webcam connected successfully!")
                     buffer = b""
 
-                    # Stream block chunks cleanly over the connection line
                     for chunk in response.iter_content(chunk_size=4096):
                         if self.closing or not self.video_running:
                             break
@@ -390,18 +399,15 @@ class ControlScreen(tk.Frame):
                         while True:
                             start = buffer.find(b"\xff\xd8")
                             if start < 0:
-                                # Keep the last 2 bytes in case a marker was cut in half
                                 if len(buffer) > 2:
                                     buffer = buffer[-2:]
                                 break
                                 
                             end = buffer.find(b"\xff\xd9", start + 2)
                             if end < 0:
-                                # We have a start marker but haven't received the whole frame yet
                                 buffer = buffer[start:]
                                 break
 
-                            # Clean frame slice extracted!
                             frame_bytes = buffer[start:end + 2]
                             buffer = buffer[end + 2:]
                             
@@ -414,17 +420,13 @@ class ControlScreen(tk.Frame):
                                     pass
                                 self.video_queue.put_nowait(frame_bytes)
 
-                    if self.video_running and not self.closing:
-                        raise requests.ConnectionError("Video stream ended.")
-
-            except (requests.RequestException, ValueError) as error:
+            except Exception as error:
                 if self.closing or not self.video_running:
                     break
                 self.video_status = "CAMERA OFFLINE"
                 message = str(error)
                 if message != last_error:
-                    self.add_log(f"VIDEO ERROR: {message}")
-                    self.add_log("VIDEO: Retrying camera connection...")
+                    self.add_log(f"VIDEO EXCEPTION ERROR: {message}")
                     last_error = message
                 time.sleep(2)
 
