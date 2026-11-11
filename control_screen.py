@@ -348,17 +348,22 @@ class ControlScreen(tk.Frame):
         return False
 
     # Receive the camera stream from the Raspberry Pi.
-    def video_worker(self):
+        def video_worker(self):
         url = API_URL.rstrip("/") + "/video_feed"
         last_error = None
 
         while self.video_running and not self.closing:
             try:
+                # Force format the Authorization token header explicitly 
+                # to guarantee it matches server.py expectations
+                token = getattr(self.client, "token", "")
+                headers = {"Authorization": f"Bearer {token}"}
+                
                 with requests.get(
                     url,
-                    headers=self.client._headers(),
+                    headers=headers,
                     stream=True,
-                    timeout=(5, 10),
+                    timeout=(5, 15), # Increased read timeout for Pi stability
                 ) as response:
                     if response.status_code != 200:
                         try:
@@ -374,7 +379,8 @@ class ControlScreen(tk.Frame):
                     last_error = None
                     buffer = b""
 
-                    for chunk in response.iter_content(chunk_size=8192):
+                    # Stream block chunks cleanly over the connection line
+                    for chunk in response.iter_content(chunk_size=4096):
                         if self.closing or not self.video_running:
                             break
                         if not chunk:
@@ -383,16 +389,22 @@ class ControlScreen(tk.Frame):
 
                         while True:
                             start = buffer.find(b"\xff\xd8")
-                            end = buffer.find(b"\xff\xd9", start + 2) if start >= 0 else -1
-                            if start < 0 or end < 0:
-                                if start > 0:
-                                    buffer = buffer[start:]
-                                elif len(buffer) > 2_000_000:
-                                    buffer = b""
+                            if start < 0:
+                                # Keep the last 2 bytes in case a marker was cut in half
+                                if len(buffer) > 2:
+                                    buffer = buffer[-2:]
+                                break
+                                
+                            end = buffer.find(b"\xff\xd9", start + 2)
+                            if end < 0:
+                                # We have a start marker but haven't received the whole frame yet
+                                buffer = buffer[start:]
                                 break
 
+                            # Clean frame slice extracted!
                             frame_bytes = buffer[start:end + 2]
                             buffer = buffer[end + 2:]
+                            
                             try:
                                 self.video_queue.put_nowait(frame_bytes)
                             except queue.Full:
@@ -415,6 +427,7 @@ class ControlScreen(tk.Frame):
                     self.add_log("VIDEO: Retrying camera connection...")
                     last_error = message
                 time.sleep(2)
+
 
     # Show camera frames in the original VIDEO STREAMING 1 panel.
     def update_video(self):
