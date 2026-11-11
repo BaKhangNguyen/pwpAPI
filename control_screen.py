@@ -34,6 +34,7 @@ class ControlScreen(tk.Frame):
         self.release_job = None
         self.video_running = True
         self.video_queue = queue.Queue(maxsize=1)
+        self.video_status = None
 
         # Build and start the control interface.
         self.pack(fill="both", expand=True)
@@ -346,68 +347,103 @@ class ControlScreen(tk.Frame):
 
         return False
 
-    # Receive camera frames without blocking the Tkinter interface.
+    # Receive the camera stream from the Raspberry Pi.
     def video_worker(self):
-        try:
-            with requests.get(
-                API_URL.rstrip("/") + "/video_feed",
-                headers=self.client._headers(),
-                stream=True,
-                timeout=(5, 15),
-            ) as response:
-                response.raise_for_status()
-                self.add_log("VIDEO: Camera connected.")
-                buffer = b""
-                for chunk in response.iter_content(chunk_size=4096):
-                    if self.closing or not self.video_running:
-                        break
-                    if not chunk:
-                        continue
-                    buffer += chunk
-                    while True:
-                        start = buffer.find(b"\xff\xd8")
-                        end = buffer.find(b"\xff\xd9", start + 2) if start != -1 else -1
-                        if start == -1 or end == -1:
-                            if start > 0:
-                                buffer = buffer[start:]
-                            elif len(buffer) > 2_000_000:
-                                buffer = b""
-                            break
-                        jpeg = buffer[start:end + 2]
-                        buffer = buffer[end + 2:]
-                        if self.video_queue.full():
-                            try:
-                                self.video_queue.get_nowait()
-                            except queue.Empty:
-                                pass
-                        self.video_queue.put_nowait(jpeg)
-        except requests.RequestException as error:
-            if not self.closing:
-                self.add_log(f"VIDEO ERROR: {error}")
+        url = API_URL.rstrip("/") + "/video_feed"
+        last_error = None
 
-    # Display the newest camera frame in VIDEO STREAMING 1.
+        while self.video_running and not self.closing:
+            try:
+                with requests.get(
+                    url,
+                    headers=self.client._headers(),
+                    stream=True,
+                    timeout=(5, 10),
+                ) as response:
+                    if response.status_code != 200:
+                        try:
+                            detail = response.json().get("message", response.reason)
+                        except ValueError:
+                            detail = response.reason
+                        raise requests.HTTPError(
+                            f"HTTP {response.status_code}: {detail}"
+                        )
+
+                    self.video_status = None
+                    self.add_log("VIDEO: USB webcam connected.")
+                    last_error = None
+                    buffer = b""
+
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if self.closing or not self.video_running:
+                            break
+                        if not chunk:
+                            continue
+                        buffer += chunk
+
+                        while True:
+                            start = buffer.find(b"\xff\xd8")
+                            end = buffer.find(b"\xff\xd9", start + 2) if start >= 0 else -1
+                            if start < 0 or end < 0:
+                                if start > 0:
+                                    buffer = buffer[start:]
+                                elif len(buffer) > 2_000_000:
+                                    buffer = b""
+                                break
+
+                            frame_bytes = buffer[start:end + 2]
+                            buffer = buffer[end + 2:]
+                            try:
+                                self.video_queue.put_nowait(frame_bytes)
+                            except queue.Full:
+                                try:
+                                    self.video_queue.get_nowait()
+                                except queue.Empty:
+                                    pass
+                                self.video_queue.put_nowait(frame_bytes)
+
+                    if self.video_running and not self.closing:
+                        raise requests.ConnectionError("Video stream ended.")
+
+            except (requests.RequestException, ValueError) as error:
+                if self.closing or not self.video_running:
+                    break
+                self.video_status = "CAMERA OFFLINE"
+                message = str(error)
+                if message != last_error:
+                    self.add_log(f"VIDEO ERROR: {message}")
+                    self.add_log("VIDEO: Retrying camera connection...")
+                    last_error = message
+                time.sleep(2)
+
+    # Show camera frames in the original VIDEO STREAMING 1 panel.
     def update_video(self):
         if self.closing:
             return
-        latest_frame = None
+
+        newest = None
         try:
             while True:
-                latest_frame = self.video_queue.get_nowait()
+                newest = self.video_queue.get_nowait()
         except queue.Empty:
             pass
 
-        if latest_frame is not None:
+        if newest is not None:
             try:
-                with Image.open(BytesIO(latest_frame)) as image:
+                with Image.open(BytesIO(newest)) as image:
                     frame = image.convert("RGB")
                 width = max(1, self.video_label.winfo_width())
                 height = max(1, self.video_label.winfo_height())
-                frame.thumbnail((width, height), Image.Resampling.LANCZOS)
+                resampling = getattr(Image, "Resampling", Image).LANCZOS
+                frame.thumbnail((width, height), resampling)
                 photo = ImageTk.PhotoImage(frame)
                 self.video_label.config(image=photo, text="")
                 self.video_label.image = photo
             except (OSError, ValueError):
                 pass
+        elif self.video_status:
+            self.video_label.config(image="", text=self.video_status)
+            self.video_label.image = None
 
         self.after(60, self.update_video)
 
