@@ -2,6 +2,7 @@ import atexit
 import secrets
 
 from flask import Flask, jsonify, request
+from camera import register_video_routes
 
 from database import DatabaseManager
 from robot import RobotClass
@@ -30,6 +31,9 @@ def is_authenticated():
         authorization.startswith("Bearer ")
         and authorization[7:] in tokens
     )
+
+
+register_video_routes(app, is_authenticated)
 
 
 # Run one rover command after verifying authentication.

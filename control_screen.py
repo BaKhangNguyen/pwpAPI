@@ -33,8 +33,9 @@ class ControlScreen(tk.Frame):
         self.log_queue = queue.Queue()
         self.release_job = None
         self.video_running = True
-        self.video_queue = queue.Queue(maxsize=1)
-        self.video_status = None
+        self.video_queues = {1: queue.Queue(maxsize=2), 2: queue.Queue(maxsize=2)}
+        self.video_labels = {}
+        self.video_status = {1: "CONNECTING...", 2: "CONNECTING..."}
 
         # Build and start the control interface.
         self.pack(fill="both", expand=True)
@@ -43,9 +44,12 @@ class ControlScreen(tk.Frame):
 
         # Start the background command worker and log processor.
         threading.Thread(target=self.command_worker, daemon=True).start()
-        threading.Thread(target=self.video_worker, daemon=True).start()
+        for stream_number in (1, 2):
+            threading.Thread(
+                target=self.video_worker, args=(stream_number,), daemon=True
+            ).start()
+            self.after(60, lambda number=stream_number: self.update_video(number))
         self.after(50, self.process_log_queue)
-        self.after(60, self.update_video)
 
         self.add_log("SYSTEM: Rover control system initialized.")
         self.add_log(f"SYSTEM: Logged in as {self.username}.")
@@ -72,8 +76,8 @@ class ControlScreen(tk.Frame):
             font=("Arial", 20),
         )
         label.place(relx=0.5, rely=0.5, anchor="center", relwidth=1, relheight=1)
-        if title == "VIDEO STREAMING 1":
-            self.video_label = label
+        stream_number = 1 if title == "VIDEO STREAMING 1" else 2
+        self.video_labels[stream_number] = label
         return panel
 
     # Build the four-quadrant GUI layout and rover controls.
@@ -347,49 +351,41 @@ class ControlScreen(tk.Frame):
 
         return False
 
-    # Receive the camera stream from the Raspberry Pi.
-            def video_worker(self):
-        """Debug-ready independent background video thread."""
-        import requests
-        
-        # Hardcode your Raspberry Pi's exact IP address and port here to guarantee it hits
-        # (Replace 127.0.0.1 with your actual Pi IP if running the GUI on a separate laptop)
-        url = "http://127.0.0"
-        
-        self.add_log("DEBUG: Video worker thread successfully started.")
-        last_error = None
+    # Each video panel receives frames in its own background thread.
+    def video_worker(self, stream_number):
+        url = f"{API_URL.rstrip('/')}/video_feed/{stream_number}"
+        frames = self.video_queues[stream_number]
+        previous_error = None
 
         while self.video_running and not self.closing:
+            token = getattr(self.client, "token", None) or getattr(self.client, "_token", None)
+            if not token:
+                self.video_status[stream_number] = "LOGIN REQUIRED"
+                time.sleep(1)
+                continue
+
             try:
-                # Bypass the client token manager completely for testing
-                # If your server requires authentication, we dynamically extract it here:
-                token = ""
-                if hasattr(self.client, "token"):
-                    token = self.client.token
-                elif hasattr(self.client, "_token"):
-                    token = self.client._token
-                
-                headers = {"Authorization": f"Bearer {token}"}
-                self.add_log(f"DEBUG: Attempting connection to {url}")
-                
                 with requests.get(
                     url,
-                    headers=headers,
+                    headers={"Authorization": f"Bearer {token}"},
                     stream=True,
-                    timeout=(5, 15),
+                    timeout=(5, 10),
                 ) as response:
-                    self.add_log(f"DEBUG: Server responded with status code {response.status_code}")
-                    
                     if response.status_code != 200:
-                        self.video_status = f"HTTP {response.status_code}"
+                        status = f"HTTP {response.status_code}"
+                        self.video_status[stream_number] = status
+                        if status != previous_error:
+                            self.add_log(f"VIDEO {stream_number}: {status} from {url}")
+                            previous_error = status
                         time.sleep(2)
                         continue
 
-                    self.video_status = None
-                    self.add_log("VIDEO: USB webcam connected successfully!")
+                    self.video_status[stream_number] = None
+                    self.add_log(f"VIDEO {stream_number}: Connected.")
+                    previous_error = None
                     buffer = b""
 
-                    for chunk in response.iter_content(chunk_size=4096):
+                    for chunk in response.iter_content(chunk_size=8192):
                         if self.closing or not self.video_running:
                             break
                         if not chunk:
@@ -399,47 +395,53 @@ class ControlScreen(tk.Frame):
                         while True:
                             start = buffer.find(b"\xff\xd8")
                             if start < 0:
-                                if len(buffer) > 2:
-                                    buffer = buffer[-2:]
+                                buffer = buffer[-2:]
                                 break
-                                
                             end = buffer.find(b"\xff\xd9", start + 2)
                             if end < 0:
                                 buffer = buffer[start:]
                                 break
 
-                            frame_bytes = buffer[start:end + 2]
+                            jpeg = buffer[start:end + 2]
                             buffer = buffer[end + 2:]
-                            
-                            try:
-                                self.video_queue.put_nowait(frame_bytes)
-                            except queue.Full:
+                            if frames.full():
                                 try:
-                                    self.video_queue.get_nowait()
+                                    frames.get_nowait()
                                 except queue.Empty:
                                     pass
-                                self.video_queue.put_nowait(frame_bytes)
+                            try:
+                                frames.put_nowait(jpeg)
+                            except queue.Full:
+                                pass
 
-            except Exception as error:
+                        if len(buffer) > 2_000_000:
+                            buffer = buffer[-2:]
+
+                if self.video_running and not self.closing:
+                    self.video_status[stream_number] = "RECONNECTING..."
+            except requests.RequestException as error:
                 if self.closing or not self.video_running:
                     break
-                self.video_status = "CAMERA OFFLINE"
                 message = str(error)
-                if message != last_error:
-                    self.add_log(f"VIDEO EXCEPTION ERROR: {message}")
-                    last_error = message
+                self.video_status[stream_number] = "CAMERA OFFLINE"
+                if message != previous_error:
+                    self.add_log(f"VIDEO {stream_number}: {message}")
+                    previous_error = message
+
+            if self.video_running and not self.closing:
                 time.sleep(2)
 
-
-    # Show camera frames in the original VIDEO STREAMING 1 panel.
-    def update_video(self):
+    # Update each video panel on the Tkinter main thread.
+    def update_video(self, stream_number):
         if self.closing:
             return
 
+        label = self.video_labels[stream_number]
+        frames = self.video_queues[stream_number]
         newest = None
         try:
             while True:
-                newest = self.video_queue.get_nowait()
+                newest = frames.get_nowait()
         except queue.Empty:
             pass
 
@@ -447,20 +449,20 @@ class ControlScreen(tk.Frame):
             try:
                 with Image.open(BytesIO(newest)) as image:
                     frame = image.convert("RGB")
-                width = max(1, self.video_label.winfo_width())
-                height = max(1, self.video_label.winfo_height())
+                width = max(1, label.winfo_width())
+                height = max(1, label.winfo_height())
                 resampling = getattr(Image, "Resampling", Image).LANCZOS
                 frame.thumbnail((width, height), resampling)
                 photo = ImageTk.PhotoImage(frame)
-                self.video_label.config(image=photo, text="")
-                self.video_label.image = photo
-            except (OSError, ValueError):
-                pass
-        elif self.video_status:
-            self.video_label.config(image="", text=self.video_status)
-            self.video_label.image = None
+                label.config(image=photo, text="")
+                label.image = photo
+            except (OSError, ValueError) as error:
+                self.add_log(f"VIDEO {stream_number}: Frame error: {error}")
+        elif self.video_status[stream_number]:
+            label.config(image="", text=self.video_status[stream_number])
+            label.image = None
 
-        self.after(60, self.update_video)
+        self.after(60, lambda: self.update_video(stream_number))
 
     # Request rover status in a separate thread so the GUI stays responsive.
     def get_status(self):

@@ -1,4 +1,4 @@
-"""USB webcam streaming for the existing Flask rover API."""
+"""Share one Raspberry Pi USB webcam with two independent video streams."""
 
 import threading
 import time
@@ -7,91 +7,147 @@ import cv2
 from flask import Response, jsonify
 
 
-# Try common USB webcam device indices. The first readable camera is used.
 CAMERA_INDICES = (0, 1, 2, 3, 4)
-_camera_lock = threading.Lock()
 
 
-def _open_camera():
-    for index in CAMERA_INDICES:
-        camera = cv2.VideoCapture(index, cv2.CAP_V4L2)
-        if not camera.isOpened():
-            camera.release()
-            continue
+class SharedCamera:
+    def __init__(self):
+        self.condition = threading.Condition()
+        self.started = False
+        self.jpeg = None
+        self.sequence = 0
+        self.camera_index = None
+        self.last_error = "Camera starting."
 
-        camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        camera.set(cv2.CAP_PROP_FPS, 15)
+    def start(self):
+        with self.condition:
+            if self.started:
+                return
+            self.started = True
+        threading.Thread(target=self.capture_loop, daemon=True, name="USB-Camera-Capture").start()
 
-        # Some webcams require a few reads before returning a frame.
-        for _ in range(12):
-            ok, frame = camera.read()
-            if ok and frame is not None:
-                return camera, index, frame
-            time.sleep(0.05)
-        camera.release()
+    def open_camera(self):
+        for index in CAMERA_INDICES:
+            for backend in (cv2.CAP_V4L2, cv2.CAP_ANY):
+                capture = cv2.VideoCapture(index, backend)
+                if not capture.isOpened():
+                    capture.release()
+                    continue
 
-    return None, None, None
+                capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+                capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                capture.set(cv2.CAP_PROP_FPS, 15)
+
+                for _ in range(12):
+                    ok, frame = capture.read()
+                    if ok and frame is not None:
+                        return capture, index, frame
+                    time.sleep(0.05)
+                capture.release()
+        return None, None, None
+
+    def capture_loop(self):
+        while True:
+            capture, index, frame = self.open_camera()
+            if capture is None:
+                with self.condition:
+                    self.jpeg = None
+                    self.camera_index = None
+                    self.last_error = "No readable USB webcam found (indices 0 to 4)."
+                    self.condition.notify_all()
+                time.sleep(2)
+                continue
+
+            print(f"VIDEO: USB webcam opened on /dev/video{index}", flush=True)
+            with self.condition:
+                self.camera_index = index
+                self.last_error = None
+
+            try:
+                while True:
+                    ok, encoded = cv2.imencode(
+                        ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75]
+                    )
+                    if ok:
+                        with self.condition:
+                            self.jpeg = encoded.tobytes()
+                            self.sequence += 1
+                            self.condition.notify_all()
+
+                    ok, frame = capture.read()
+                    if not ok or frame is None:
+                        break
+                    time.sleep(0.015)
+            except Exception as error:
+                with self.condition:
+                    self.last_error = str(error)
+            finally:
+                capture.release()
+                with self.condition:
+                    self.jpeg = None
+                    self.camera_index = None
+                    self.last_error = self.last_error or "Camera disconnected. Reconnecting."
+                    self.condition.notify_all()
+                time.sleep(1)
+
+    def wait_for_frame(self, after_sequence=0, timeout=6):
+        with self.condition:
+            available = self.condition.wait_for(
+                lambda: self.jpeg is not None and self.sequence > after_sequence,
+                timeout=timeout,
+            )
+            if not available:
+                return None
+            return self.sequence, self.jpeg
+
+    def status(self):
+        with self.condition:
+            return self.camera_index, self.last_error
 
 
-def _jpeg_part(frame):
-    ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-    if not ok:
-        return None
-    return b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg.tobytes() + b"\r\n"
+camera = SharedCamera()
 
 
 def register_video_routes(app, is_authenticated):
     @app.route("/camera_check", methods=["GET"])
     def camera_check():
-        # Check the webcam without requiring a GUI login.
-        if not _camera_lock.acquire(blocking=False):
-            return jsonify(success=True, message="Camera is already streaming.")
-
-        camera = None
-        try:
-            camera, index, frame = _open_camera()
-            if camera is None:
-                return jsonify(success=False, message="No readable USB webcam found on indices 0 to 4."), 503
-            return jsonify(success=True, message="USB webcam ready.", camera_index=index)
-        finally:
-            if camera is not None:
-                camera.release()
-            _camera_lock.release()
+        camera.start()
+        frame = camera.wait_for_frame(timeout=5)
+        index, error = camera.status()
+        if frame is None:
+            return jsonify(success=False, message=error or "Camera did not return a frame."), 503
+        return jsonify(success=True, message="USB webcam ready.", camera_index=index)
 
     @app.route("/video_feed", methods=["GET"])
-    def video_feed():
-        # Keep the camera stream protected by the normal login token.
+    @app.route("/video_feed/<int:stream_number>", methods=["GET"])
+    def video_feed(stream_number=1):
+        if stream_number not in (1, 2):
+            return jsonify(success=False, message="Unknown video stream."), 404
         if not is_authenticated():
             return jsonify(success=False, message="Authentication required."), 401
-        if not _camera_lock.acquire(blocking=False):
-            return jsonify(success=False, message="Camera is already in use."), 409
 
-        camera, index, first_frame = _open_camera()
-        if camera is None:
-            _camera_lock.release()
-            return jsonify(success=False, message="USB webcam could not return a frame."), 503
-
-        first_part = _jpeg_part(first_frame)
-        if first_part is None:
-            camera.release()
-            _camera_lock.release()
-            return jsonify(success=False, message="Camera JPEG encoding failed."), 503
+        camera.start()
+        first = camera.wait_for_frame(timeout=5)
+        if first is None:
+            _, error = camera.status()
+            return jsonify(success=False, message=error or "Webcam unavailable."), 503
 
         def generate_frames():
-            try:
-                yield first_part
-                while True:
-                    ok, frame = camera.read()
-                    if not ok or frame is None:
-                        break
-                    part = _jpeg_part(frame)
-                    if part is not None:
-                        yield part
-            finally:
-                camera.release()
-                _camera_lock.release()
+            current = first
+            while current is not None:
+                sequence, jpeg = current
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n"
+                    + f"Content-Length: {len(jpeg)}\r\n".encode("ascii")
+                    + b"\r\n" + jpeg + b"\r\n"
+                )
+                current = camera.wait_for_frame(after_sequence=sequence, timeout=6)
 
-        print(f"VIDEO: Streaming USB webcam index {index}")
-        return Response(generate_frames(), mimetype="multipart/x-mixed-replace; boundary=frame")
+        print(f"VIDEO: Stream {stream_number} connected", flush=True)
+        return Response(
+            generate_frames(),
+            mimetype="multipart/x-mixed-replace; boundary=frame",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
