@@ -2,7 +2,7 @@ import atexit
 import secrets
 
 from flask import Flask, jsonify, request
-from camera import register_video_routes
+from camera import camera, register_video_routes
 
 from database import DatabaseManager
 from robot import RobotClass
@@ -184,6 +184,7 @@ def status():
 
 # Stop the rover if the Python program exits normally.
 atexit.register(rover.STOP)
+atexit.register(camera.stop)
 
 
 # Start the Flask server when server.py is run directly.
@@ -201,4 +202,5 @@ if __name__ == "__main__":
 
     # Make sure the motors are stopped when the server shuts down.
     finally:
+        camera.stop()
         rover.STOP()

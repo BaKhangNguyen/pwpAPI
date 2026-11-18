@@ -3,6 +3,8 @@ import threading
 import time
 import tkinter as tk
 from io import BytesIO
+from datetime import datetime
+from pathlib import Path
 
 import requests
 from PIL import Image, ImageTk
@@ -36,6 +38,8 @@ class ControlScreen(tk.Frame):
         self.video_queues = {1: queue.Queue(maxsize=2), 2: queue.Queue(maxsize=2)}
         self.video_labels = {}
         self.video_status = {1: "CONNECTING...", 2: "CONNECTING..."}
+        self.video_restart_id = 0
+        self.log_file = Path(__file__).resolve().parent / "rover_user_log.txt"
 
         # Build and start the control interface.
         self.pack(fill="both", expand=True)
@@ -130,6 +134,10 @@ class ControlScreen(tk.Frame):
         )
         self.status_button.grid(row=3, column=1, padx=8, pady=8)
 
+        # Play restarts both live video connections.
+        self.play_button = tk.Button(control_area, text="PLAY", width=8, command=self.play_video)
+        self.play_button.grid(row=3, column=2, padx=8, pady=8)
+
         # Explain how the current control mode works.
         self.mode_help_label = tk.Label(
             controls,
@@ -146,6 +154,12 @@ class ControlScreen(tk.Frame):
             font=("Consolas", 12),
         )
         self.log_screen.place(relx=0.05, rely=0.15, relwidth=0.90, relheight=0.75)
+
+    def play_video(self):
+        if self.closing:
+            return
+        self.video_restart_id += 1
+        self.add_log("PLAY: Reconnecting both video streams.")
 
     # Create a movement button with mouse press and release controls.
     def make_drive_button(self, parent, text, command):
@@ -264,6 +278,7 @@ class ControlScreen(tk.Frame):
                 return
             self.active_command = command
 
+        self.add_log(f"REQUEST: {command}")
         self.command_queue.put(command)
 
     # Remove commands that are still waiting to be processed.
@@ -286,6 +301,7 @@ class ControlScreen(tk.Frame):
             self.active_command = "STOP"
 
         self.clear_pending_commands()
+        self.add_log("REQUEST: STOP")
         self.command_queue.put("STOP")
 
     # Background worker sends queued commands to the Raspberry Pi API.
@@ -365,6 +381,7 @@ class ControlScreen(tk.Frame):
                 continue
 
             try:
+                restart_id = self.video_restart_id
                 with requests.get(
                     url,
                     headers={"Authorization": f"Bearer {token}"},
@@ -386,7 +403,8 @@ class ControlScreen(tk.Frame):
                     buffer = b""
 
                     for chunk in response.iter_content(chunk_size=8192):
-                        if self.closing or not self.video_running:
+                        if (self.closing or not self.video_running
+                                or restart_id != self.video_restart_id):
                             break
                         if not chunk:
                             continue
@@ -469,6 +487,7 @@ class ControlScreen(tk.Frame):
         if self.closing:
             return
 
+        self.add_log("REQUEST: STATUS")
         threading.Thread(target=self.get_status_request, daemon=True).start()
 
     def get_status_request(self):
@@ -491,6 +510,14 @@ class ControlScreen(tk.Frame):
     def add_log(self, message):
         self.log_queue.put(message)
 
+    def save_log(self, message):
+        entry = f"{datetime.now():%Y-%m-%d %H:%M:%S} | {self.username} | {message}\n"
+        try:
+            with self.log_file.open("a", encoding="utf-8") as file:
+                file.write(entry)
+        except OSError as error:
+            print(f"Cannot save rover log: {error}")
+
     # Display queued log messages in the User Log.
     def process_log_queue(self):
         if self.closing:
@@ -502,6 +529,7 @@ class ControlScreen(tk.Frame):
             except queue.Empty:
                 break
 
+            self.save_log(message)
             if self.log_screen.winfo_exists():
                 self.log_screen.insert(tk.END, message + "\n")
                 self.log_screen.see(tk.END)
@@ -515,6 +543,7 @@ class ControlScreen(tk.Frame):
         if self.closing:
             return
 
+        self.save_log("REQUEST: STOP (closing GUI)")
         self.closing = True
         self.video_running = False
         self.cancel_release_job()
@@ -526,4 +555,5 @@ class ControlScreen(tk.Frame):
         except Exception:
             pass
 
+        self.save_log("SYSTEM: GUI closed.")
         self.winfo_toplevel().destroy()
